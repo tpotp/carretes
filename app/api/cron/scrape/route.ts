@@ -4,6 +4,8 @@ import {
   extractEventDate,
   firstMeaningfulLine,
   isLikelyEventPost,
+  normalizeText,
+  toChileDateString,
 } from '../../../../lib/event-extraction';
 
 const APIFY_TOKEN = process.env.APIFY_API_TOKEN;
@@ -14,6 +16,7 @@ const APIFY_NEWER_THAN = process.env.APIFY_NEWER_THAN || '3 days';
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// MVP scope: nightlife / music / parties only. Keep the source boundary explicit.
 const VENUE_INFO: Record<string, { name: string; location: string; tier: string }> = {
   'el.huevo': { name: 'El Huevo Valparaíso', location: 'Valparaíso (Blanco 1386)', tier: 'mainstream' },
   'barelhuevo': { name: 'El Huevo Bar', location: 'Valparaíso (Blanco 1386)', tier: 'mainstream' },
@@ -31,8 +34,7 @@ const VENUE_INFO: Record<string, { name: string; location: string; tier: string 
   'valparaiso_techno': { name: 'Valparaíso Techno', location: 'Valparaíso', tier: 'joyita' },
   'baptism_producciones': { name: 'Baptism Producciones', location: 'Valparaíso', tier: 'joyita' },
   'distorsionsonora': { name: 'Distorsión Sonora', location: 'Valparaíso', tier: 'joyita' },
-  'insomnia_teatro_condell': { name: 'Teatro Condell Insomnia', location: 'Condell 1585, Valparaíso', tier: 'cultura' },
-  'parqueculturaldevalparaiso': { name: 'Parque Cultural ex Cárcel', location: 'Cárcel 471, Valparaíso', tier: 'cultura' },
+  'ritoquefm': { name: 'Ritoque FM', location: 'Valparaíso', tier: 'mainstream' },
 };
 
 type JsonRecord = Record<string, unknown>;
@@ -161,20 +163,74 @@ function optionalString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
+function isNightlifeFocused(caption: string): boolean {
+  const text = normalizeText(caption);
+  const signals = [
+    'fiesta', 'carrete', 'rave', 'tocata', 'concierto', 'festival', 'fonda',
+    'techno', 'cumbia', 'reggaeton', 'perreo', 'party', 'after', 'b2b', 'dj ',
+    ' dj', 'lineup', 'preventa', 'preventas', 'entrada', 'tickets', 'ticket',
+    'puertas', 'tributo', 'en vivo', 'club ', 'discoteca', 'pista',
+  ];
+  return signals.some((signal) => text.includes(signal));
+}
+
+function isGenericPromoTitle(title: string): boolean {
+  const text = normalizeText(title).replace(/\s+/g, ' ').trim();
+  return /\b(artista confirmado|artista confirmada|lineup confirmado|line up confirmado|invitado confirmado|invitada confirmada)\b/.test(text);
+}
+
+function normalizedTitle(title: string): string {
+  return normalizeText(title)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function deduplicateEventRows(rows: EventRow[]): EventRow[] {
+  const byInstagramId = Array.from(new Map(rows.map((row) => [row.instagram_id, row])).values());
+  const groups = new Map<string, EventRow[]>();
+
+  for (const row of byInstagramId) {
+    const key = `${row.username}|${row.date_text}`;
+    const group = groups.get(key) || [];
+    group.push(row);
+    groups.set(key, group);
+  }
+
+  const output: EventRow[] = [];
+  for (const group of groups.values()) {
+    const hasCanonicalPost = group.some((row) => !isGenericPromoTitle(row.title));
+    const seenTitles = new Set<string>();
+
+    const ordered = [...group].sort((a, b) => b.description.length - a.description.length);
+    for (const row of ordered) {
+      if (hasCanonicalPost && isGenericPromoTitle(row.title)) continue;
+      const titleKey = normalizedTitle(row.title);
+      if (titleKey && seenTitles.has(titleKey)) continue;
+      if (titleKey) seenTitles.add(titleKey);
+      output.push(row);
+    }
+  }
+
+  return output;
+}
+
 function postToRow(item: JsonRecord): EventRow | null {
   const username = getUsername(item);
-  const meta = VENUE_INFO[username] || {
-    name: username ? `@${username}` : 'Evento V Región',
-    location: 'Valparaíso',
-    tier: 'mainstream',
-  };
+  const meta = VENUE_INFO[username];
+  // Apify can surface collaborators/related owners. Never admit accounts outside the explicit source list.
+  if (!meta) return null;
 
   const caption = String(firstValue(item, ['caption', 'alt']) || '').trim();
   const shortcode = String(firstValue(item, ['shortCode', 'id']) || '').trim();
   if (!shortcode || !caption) return null;
 
   const eventDate = extractEventDate(caption, getPublishedAt(item));
-  if (!eventDate || !isLikelyEventPost(caption, eventDate)) return null;
+  if (!eventDate || !isLikelyEventPost(caption, eventDate) || !isNightlifeFocused(caption)) return null;
+
+  // The public product is a current/future event guide. Past dates stay out even if Apify returns old posts.
+  const today = toChileDateString(new Date());
+  if (eventDate < today) return null;
 
   const isJoyita =
     meta.tier === 'joyita' ||
@@ -234,7 +290,7 @@ export async function GET(request: Request) {
     const items = await runApify(urls);
 
     const rows = items.map(postToRow).filter((row): row is EventRow => row !== null);
-    const unique = Array.from(new Map(rows.map((row) => [row.instagram_id, row])).values());
+    const unique = deduplicateEventRows(rows);
 
     if (unique.length > 0) {
       const { error } = await supabase.from('events').upsert(unique, { onConflict: 'instagram_id' });
@@ -247,6 +303,7 @@ export async function GET(request: Request) {
       posts_found: items.length,
       event_candidates: rows.length,
       events_saved: unique.length,
+      deduped_or_suppressed: rows.length - unique.length,
       skipped_non_events: items.length - rows.length,
       apify_results_limit_per_account: APIFY_RESULTS_LIMIT,
       apify_newer_than: APIFY_NEWER_THAN,
