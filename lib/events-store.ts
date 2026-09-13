@@ -1,22 +1,29 @@
 import { Evento, EventoFormData, FiltrosEvento, Categoria } from './types';
 import { supabase } from './supabase';
+import {
+  extractEventTime,
+  extractPriceInfo,
+  inferCity,
+  normalizeText,
+  toChileDateString,
+} from './event-extraction';
 
 const RSVPS_KEY = 'carretes_valpo_rsvps_v1';
+const STORAGE_KEY = 'carretes_valpo_eventos_v3';
+let memoryEvents: Evento[] = [];
 
-// Detector inteligente de joyitas y categorías para la araña
 function detectCategoryAndJoyita(title: string, desc: string, username: string, source: string) {
-  const text = `${title} ${desc} ${username} ${source}`.toLowerCase();
+  const text = normalizeText(`${title} ${desc} ${username} ${source}`);
 
   const isJoyita =
     source === 'joyita_under' ||
     text.includes('spot secreto') ||
-    text.includes('ubicación por dm') ||
+    text.includes('ubicacion por dm') ||
     text.includes('por interno') ||
     text.includes('aporte voluntario') ||
     text.includes('al sobre') ||
-    text.includes('galpón') ||
+    text.includes('galpon') ||
     text.includes('casona') ||
-    text.includes('fonda dark') ||
     text.includes('post punk') ||
     text.includes('darkwave') ||
     text.includes('ebm') ||
@@ -24,15 +31,11 @@ function detectCategoryAndJoyita(title: string, desc: string, username: string, 
     text.includes('hard techno') ||
     text.includes('clandestin') ||
     text.includes('warhola') ||
-    text.includes('insomnia') ||
-    text.includes('cine foro') ||
-    text.includes('autónom') ||
-    text.includes('autogest') ||
-    text.includes('tributo') ||
-    text.includes('parque cultural');
+    text.includes('autogest');
 
   let categoria: Categoria = 'under';
   if (
+    text.includes('categoria: electronica') ||
     text.includes('techno') ||
     text.includes('rave') ||
     text.includes('house') ||
@@ -43,6 +46,7 @@ function detectCategoryAndJoyita(title: string, desc: string, username: string, 
   ) {
     categoria = 'electronica';
   } else if (
+    text.includes('categoria: rock') ||
     text.includes('rock') ||
     text.includes('punk') ||
     text.includes('post-punk') ||
@@ -54,108 +58,137 @@ function detectCategoryAndJoyita(title: string, desc: string, username: string, 
     text.includes('en vivo')
   ) {
     categoria = 'rock';
-  } else if (text.includes('cumbia') || text.includes('salsa') || text.includes('cueca') || text.includes('pachanga')) {
+  } else if (
+    text.includes('categoria: cumbia') ||
+    text.includes('cumbia') ||
+    text.includes('salsa') ||
+    text.includes('cueca') ||
+    text.includes('pachanga')
+  ) {
     categoria = 'cumbia';
-  } else if (text.includes('reggaeton') || text.includes('perreo') || text.includes('bellakeo') || text.includes('urbano')) {
+  } else if (
+    text.includes('categoria: reggaeton') ||
+    text.includes('reggaeton') ||
+    text.includes('perreo') ||
+    text.includes('bellakeo') ||
+    text.includes('urbano')
+  ) {
     categoria = 'reggaeton';
-  } else if (text.includes('universitari') || text.includes('mechoneo') || text.includes('pucv') || text.includes('uv') || text.includes('usm') || text.includes('upla')) {
+  } else if (
+    text.includes('categoria: universitario') ||
+    text.includes('universitari') ||
+    text.includes('mechoneo') ||
+    text.includes('pucv') ||
+    text.includes('uv ') ||
+    text.includes('usm') ||
+    text.includes('upla')
+  ) {
     categoria = 'universitario';
+  } else if (text.includes('categoria: otro')) {
+    categoria = 'otro';
   } else if (isJoyita || text.includes('under') || text.includes('queer') || text.includes('drag')) {
     categoria = 'under';
   }
 
-  const tags: string[] = ['instagram'];
+  const tags: string[] = [];
+  if (source !== 'manual') tags.push('instagram');
   if (isJoyita) tags.push('💎 joyita oculta');
   if (categoria === 'electronica') tags.push('techno / rave');
-  if (categoria === 'rock') tags.push('tocata viva');
-  if (text.includes('gratis') || text.includes('liberada') || text.includes('al sobre')) tags.push('aporte voluntario');
+  if (categoria === 'rock') tags.push('tocata');
+  if (text.includes('aporte voluntario')) tags.push('aporte voluntario');
 
   return { categoria, isJoyita, tags };
 }
 
-// Adaptador: Convierte fila de DB (events) a tipo Evento de la app
-function dbRowToEvento(row: any): Evento {
-  const { categoria, isJoyita, tags } = detectCategoryAndJoyita(
-    row.title || '',
-    row.description || '',
-    row.username || '',
-    row.source || ''
-  );
+function parseLocation(rawLocation: string) {
+  const raw = rawLocation || 'Valparaíso';
+  const parts = raw.split('·').map((part) => part.trim()).filter(Boolean);
+  const city = inferCity(raw);
+  return {
+    lugar: parts[0] || raw,
+    ciudad: city,
+    sector: parts.length >= 3 ? parts[2] : null,
+  };
+}
+
+export function dbRowToEvento(row: any): Evento {
+  const description = String(row.description || '');
+  const title = String(row.title || 'Evento sin nombre');
+  const source = String(row.source || '');
+  const username = String(row.username || '');
+  const { categoria, isJoyita, tags } = detectCategoryAndJoyita(title, description, username, source);
+  const priceInfo = extractPriceInfo(description);
+  const location = parseLocation(String(row.location || 'Valparaíso'));
+  const eventTime = extractEventTime(description);
+  const isManual = source === 'manual';
 
   return {
-    id: String(row.id || row.instagram_id),
-    nombre: row.title || 'Evento sin nombre',
-    descripcion: row.description || '',
-    fecha: row.date_text || new Date(row.scraped_at || Date.now()).toISOString().split('T')[0],
-    hora: '22:00',
-    lugar: row.location || 'Valparaíso',
-    ciudad: row.location || 'Valparaíso',
-    sector: null,
-    precio: 0,
-    precio_texto: isJoyita ? 'Aporte Voluntario / Info por DM' : 'Ver detalles en Instagram',
+    id: String(row.instagram_id || row.id),
+    nombre: title,
+    descripcion: description,
+    fecha: String(row.date_text || toChileDateString(row.scraped_at || new Date())),
+    hora: eventTime,
+    lugar: location.lugar,
+    ciudad: location.ciudad,
+    sector: location.sector,
+    precio: priceInfo.price,
+    precio_conocido: priceInfo.known,
+    precio_texto: priceInfo.text,
     categoria,
     imagen_url: row.image_url || null,
-    fuente: 'instagram',
+    fuente: isManual ? 'manual' : 'instagram',
     fuente_url: row.instagram_url || null,
-    organizador: row.username ? (row.username.startsWith('@') ? row.username : `@${row.username}`) : null,
-    organizador_url: row.username ? `https://www.instagram.com/${row.username.replace('@', '')}/` : null,
+    organizador: username ? (username.startsWith('@') ? username : `@${username}`) : null,
+    organizador_url: !isManual && username
+      ? `https://www.instagram.com/${username.replace('@', '')}/`
+      : null,
     verificado: false,
-    destacado: isJoyita || (row.likes && row.likes > 400),
+    destacado: isJoyita,
     activo: row.is_active !== false,
-    asistentes_interesados: row.likes || 1,
+    asistentes_interesados: 0,
     tags,
     created_at: row.scraped_at || new Date().toISOString(),
   };
 }
 
 export function getChileTodayStr(): string {
-  try {
-    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago' }).format(new Date());
-  } catch {
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth() + 1).padStart(2, '0');
-    const d = String(now.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
+  return toChileDateString(new Date());
 }
 
-const STORAGE_KEY = 'carretes_valpo_eventos_v2_clean';
-let memoryEvents: Evento[] = [];
-
 export function getStoredEvents(): Evento[] {
-  if (typeof window === 'undefined') {
-    return memoryEvents;
-  }
+  if (typeof window === 'undefined') return memoryEvents;
+
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const clean = parsed.filter((e) => e && e.fecha && e.fecha >= '2026-09-01');
+      if (Array.isArray(parsed)) {
+        const clean = parsed.filter(
+          (event) => event && /^20\d{2}-[01]\d-[0-3]\d$/.test(String(event.fecha || '')),
+        );
         memoryEvents = clean;
         return clean;
       }
     }
-  } catch {}
+  } catch {
+    // Un localStorage corrupto no debe romper la cartelera.
+  }
   return memoryEvents;
 }
 
 export function getEventById(id: string): Evento | undefined {
-  return getStoredEvents().find((e) => e.id === id || e.fuente_url?.includes(id));
+  return getStoredEvents().find((event) => event.id === id || event.fuente_url?.includes(id));
 }
 
-// Fetch desde Supabase — si no hay datos o falla, retorna []
 export async function fetchEventsFromSupabase(): Promise<Evento[]> {
-  if (!supabase) {
-    return getStoredEvents();
-  }
+  if (!supabase) return getStoredEvents();
 
   try {
     const { data, error } = await supabase
       .from('events')
       .select('*')
       .eq('is_active', true)
+      .order('date_text', { ascending: true })
       .order('scraped_at', { ascending: false });
 
     if (error) {
@@ -163,77 +196,84 @@ export async function fetchEventsFromSupabase(): Promise<Evento[]> {
       return getStoredEvents();
     }
 
-    if (!data || data.length === 0) {
-      return getStoredEvents();
-    }
+    if (!data || data.length === 0) return getStoredEvents();
 
     const mapped = data.map(dbRowToEvento);
     memoryEvents = mapped;
+
     if (typeof window !== 'undefined') {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(mapped));
         window.dispatchEvent(new Event('carretes_storage_updated'));
-      } catch {}
+      } catch {
+        // La app sigue funcionando aunque el navegador bloquee almacenamiento.
+      }
     }
+
     return mapped;
-  } catch (err) {
-    console.error('Error fetching events from Supabase:', err);
+  } catch (error) {
+    console.error('Error fetching events from Supabase:', error);
     return getStoredEvents();
   }
 }
 
 export function saveEvent(formData: EventoFormData): Evento {
+  const id = `evt-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const numericPrice = typeof formData.precio === 'number' ? formData.precio : 0;
+
   const newEvent: Evento = {
-    id: 'evt-user-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7),
+    id,
     nombre: formData.nombre.trim(),
     descripcion: formData.descripcion.trim(),
     fecha: formData.fecha,
-    hora: formData.hora || '22:00',
+    hora: formData.hora || null,
     lugar: formData.lugar.trim(),
     ciudad: formData.ciudad || 'Valparaíso',
     sector: formData.sector?.trim() || null,
-    precio: typeof formData.precio === 'number' ? formData.precio : 0,
-    precio_texto: formData.precio_texto?.trim() || (formData.precio === 0 ? 'Entrada Liberada' : `$${Number(formData.precio).toLocaleString('es-CL')}`),
+    precio: numericPrice,
+    precio_conocido: true,
+    precio_texto:
+      formData.precio_texto?.trim() ||
+      (numericPrice === 0 ? 'Entrada liberada' : `$${numericPrice.toLocaleString('es-CL')}`),
     categoria: formData.categoria,
     imagen_url: formData.imagen_url?.trim() || null,
     fuente: 'manual',
     fuente_url: formData.fuente_url?.trim() || null,
-    organizador: formData.organizador.trim().startsWith('@') ? formData.organizador.trim() : `@${formData.organizador.trim()}`,
-    organizador_url: formData.organizador_url || (formData.organizador.startsWith('@') ? `https://www.instagram.com/${formData.organizador.replace('@', '')}/` : null),
+    organizador: formData.organizador.trim().startsWith('@')
+      ? formData.organizador.trim()
+      : `@${formData.organizador.trim()}`,
+    organizador_url: formData.organizador_url || null,
     verificado: false,
     destacado: false,
     activo: true,
-    asistentes_interesados: 1,
-    tags: formData.tags ? formData.tags.split(',').map((t) => t.trim().toLowerCase()) : ['carrete', formData.categoria],
+    asistentes_interesados: 0,
+    tags: formData.tags
+      ? formData.tags.split(',').map((tag) => tag.trim().toLowerCase()).filter(Boolean)
+      : ['carrete', formData.categoria],
     created_at: new Date().toISOString(),
   };
 
   memoryEvents.unshift(newEvent);
+
   if (typeof window !== 'undefined') {
     try {
-      const current = getStoredEvents();
+      const current = getStoredEvents().filter((event) => event.id !== id);
       localStorage.setItem(STORAGE_KEY, JSON.stringify([newEvent, ...current]));
       window.dispatchEvent(new Event('carretes_storage_updated'));
-    } catch {}
-  }
+    } catch {
+      // La publicación server-side se intenta igualmente.
+    }
 
-  // Guardar en Supabase si está disponible
-  if (supabase) {
-    supabase.from('events').insert({
-      instagram_id: newEvent.id,
-      title: newEvent.nombre,
-      description: newEvent.descripcion,
-      date_text: newEvent.fecha,
-      location: newEvent.ciudad,
-      image_url: newEvent.imagen_url,
-      instagram_url: newEvent.fuente_url,
-      username: newEvent.organizador,
-      likes: 1,
-      source: 'manual',
-      is_active: true,
-    }).then(({ error }: any) => {
-      if (error) console.error('Error saving to Supabase:', error);
-    });
+    void fetch('/api/publicar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...formData, client_id: id }),
+    }).then(async (response) => {
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        console.error('Error publishing event:', payload?.error || response.statusText);
+      }
+    }).catch((error) => console.error('Error publishing event:', error));
   }
 
   return newEvent;
@@ -246,11 +286,9 @@ export function toggleRsvp(eventId: string): { interested: boolean; count: numbe
     const rawRsvps = localStorage.getItem(RSVPS_KEY);
     const rsvps: string[] = rawRsvps ? JSON.parse(rawRsvps) : [];
     const isAlready = rsvps.includes(eventId);
-
-    const newRsvps = isAlready ? rsvps.filter((id) => id !== eventId) : [...rsvps, eventId];
-    localStorage.setItem(RSVPS_KEY, JSON.stringify(newRsvps));
-
-    return { interested: !isAlready, count: 0 };
+    const next = isAlready ? rsvps.filter((id) => id !== eventId) : [...rsvps, eventId];
+    localStorage.setItem(RSVPS_KEY, JSON.stringify(next));
+    return { interested: !isAlready, count: isAlready ? 0 : 1 };
   } catch {
     return { interested: false, count: 0 };
   }
@@ -269,88 +307,68 @@ export function getUserRsvps(): string[] {
 export function filterEvents(events: Evento[], filters: FiltrosEvento): Evento[] {
   const todayStr = getChileTodayStr();
 
-  const filtered = events.filter((evt) => {
-    if (!evt.activo) return false;
+  const filtered = events.filter((event) => {
+    if (!event.activo || !/^20\d{2}-[01]\d-[0-3]\d$/.test(event.fecha || '')) return false;
 
-    // Descartar automáticamente contenido anterior a septiembre 2026 (elimina 2019, 2020, etc.)
-    if (!evt.fecha || evt.fecha < '2026-09-01') return false;
-
-    if (filters.busqueda && filters.busqueda.trim() !== '') {
-      const q = filters.busqueda.toLowerCase().trim();
-      const matchName = evt.nombre.toLowerCase().includes(q);
-      const matchDesc = evt.descripcion?.toLowerCase().includes(q);
-      const matchLugar = evt.lugar?.toLowerCase().includes(q);
-      const matchOrg = evt.organizador?.toLowerCase().includes(q);
-      const matchCity = evt.ciudad.toLowerCase().includes(q);
-      const matchTags = evt.tags?.some((t) => t.toLowerCase().includes(q));
-
-      if (!matchName && !matchDesc && !matchLugar && !matchOrg && !matchCity && !matchTags) {
-        return false;
-      }
+    if (filters.busqueda?.trim()) {
+      const query = normalizeText(filters.busqueda.trim());
+      const searchable = normalizeText(
+        `${event.nombre} ${event.descripcion || ''} ${event.lugar || ''} ${event.organizador || ''} ${event.ciudad} ${(event.tags || []).join(' ')}`,
+      );
+      if (!searchable.includes(query)) return false;
     }
 
-    if (filters.categoria && filters.categoria !== 'todos') {
-      if (evt.categoria !== filters.categoria) return false;
+    if (filters.categoria && filters.categoria !== 'todos' && event.categoria !== filters.categoria) {
+      return false;
     }
 
-    if (filters.ciudad && filters.ciudad !== 'todos') {
-      if (evt.ciudad.toLowerCase() !== filters.ciudad.toLowerCase()) return false;
+    if (
+      filters.ciudad &&
+      filters.ciudad !== 'todos' &&
+      normalizeText(event.ciudad) !== normalizeText(filters.ciudad)
+    ) {
+      return false;
     }
 
     if (filters.precio && filters.precio !== 'todos') {
-      if (filters.precio === 'gratis' && evt.precio > 0) return false;
-      if (filters.precio === 'pago' && evt.precio === 0) return false;
+      if (event.precio_conocido === false) return false;
+      if (filters.precio === 'gratis' && event.precio !== 0) return false;
+      if (filters.precio === 'pago' && event.precio <= 0) return false;
     }
 
     if (filters.fecha && filters.fecha !== 'todos') {
-      const evtDate = evt.fecha;
-      const today = new Date();
-      const currentDayOfWeek = today.getDay(); // 0=domingo, 5=viernes, 6=sábado
+      if (filters.fecha === 'hoy' && event.fecha !== todayStr) return false;
+      if (filters.fecha === 'futuro' && event.fecha < todayStr) return false;
 
-      if (filters.fecha === 'hoy') {
-        if (evtDate !== todayStr) return false;
-      } else if (filters.fecha === 'futuro') {
-        // Todos los eventos desde hoy en adelante (hoy, mañana, fiestas patrias 18-19-20)
-        if (evtDate < todayStr) return false;
-      } else if (filters.fecha === 'finde') {
-        // Fin de semana actual (Viernes a Domingo)
-        const fri = new Date(today);
-        const daysFromFri = (currentDayOfWeek === 0 ? 2 : currentDayOfWeek - 5);
-        fri.setDate(today.getDate() - daysFromFri);
+      if (filters.fecha === 'semana') {
+        const [year, month, day] = todayStr.split('-').map(Number);
+        const end = new Date(Date.UTC(year, month - 1, day + 7, 12)).toISOString().slice(0, 10);
+        if (event.fecha < todayStr || event.fecha > end) return false;
+      }
 
-        const sun = new Date(fri);
-        sun.setDate(fri.getDate() + 2);
-
-        const friStr = fri.toISOString().split('T')[0];
-        const sunStr = sun.toISOString().split('T')[0];
-
-        if (evtDate < friStr || evtDate > sunStr) return false;
-      } else if (filters.fecha === 'semana') {
-        const nextWeek = new Date(today);
-        nextWeek.setDate(today.getDate() + 7);
-        const nextWeekStr = nextWeek.toISOString().split('T')[0];
-
-        if (evtDate < todayStr || evtDate > nextWeekStr) return false;
+      if (filters.fecha === 'finde') {
+        const [year, month, day] = todayStr.split('-').map(Number);
+        const current = new Date(Date.UTC(year, month - 1, day, 12));
+        const dow = current.getUTCDay();
+        const daysUntilFriday = dow <= 5 ? 5 - dow : dow === 6 ? -1 : -2;
+        const friday = new Date(current);
+        friday.setUTCDate(current.getUTCDate() + daysUntilFriday);
+        const sunday = new Date(friday);
+        sunday.setUTCDate(friday.getUTCDate() + 2);
+        const fridayStr = friday.toISOString().slice(0, 10);
+        const sundayStr = sunday.toISOString().slice(0, 10);
+        if (event.fecha < fridayStr || event.fecha > sundayStr) return false;
       }
     }
 
     return true;
   });
 
-  // Ordenar inteligentemente: Hoy y Futuro van PRIMERO (cronológico), eventos pasados al final
   return filtered.sort((a, b) => {
-    const aIsFuture = (a.fecha || '') >= todayStr;
-    const bIsFuture = (b.fecha || '') >= todayStr;
-
-    if (aIsFuture && !bIsFuture) return -1;
-    if (!aIsFuture && bIsFuture) return 1;
-
-    if (aIsFuture && bIsFuture) {
-      // Orden cronológico ascendente (los de hoy primero, luego mañana, luego el 18)
-      return (a.fecha || '').localeCompare(b.fecha || '');
-    }
-
-    // Pasados: más recientes primero
-    return (b.fecha || '').localeCompare(a.fecha || '');
+    const aFuture = a.fecha >= todayStr;
+    const bFuture = b.fecha >= todayStr;
+    if (aFuture && !bFuture) return -1;
+    if (!aFuture && bFuture) return 1;
+    return aFuture ? a.fecha.localeCompare(b.fecha) : b.fecha.localeCompare(a.fecha);
   });
 }

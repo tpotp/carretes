@@ -1,8 +1,0 @@
-[build]
-builder = "dockerfile"
-dockerfilePath = "scraper-service/Dockerfile"
-buildContext = "scraper-service"
-
-[deploy]
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3

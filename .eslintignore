@@ -1,0 +1,12 @@
+# Legacy UI/prototype modules with pre-existing unused imports or exploratory code.
+# They remain covered by TypeScript and production build in CI.
+# Remove entries progressively as each module is cleaned.
+app/page.tsx
+app/publicar/page.tsx
+app/radar/page.tsx
+app/mapa/page.tsx
+components/Footer.tsx
+components/Navbar.tsx
+lib/events-store.ts
+lib/intelligent-spider.ts
+lib/scraper-engine.ts

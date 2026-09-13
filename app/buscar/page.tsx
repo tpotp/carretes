@@ -3,9 +3,9 @@
 import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { Search, Filter, MapPin, Calendar, ArrowLeft } from 'lucide-react';
-import { Evento, Categoria, CIUDADES, CATEGORIAS } from '../../lib/types';
-import { getStoredEvents, filterEvents, fetchEventsFromSupabase, getChileTodayStr } from '../../lib/events-store';
+import { ArrowLeft } from 'lucide-react';
+import { Evento, Categoria, CIUDADES } from '../../lib/types';
+import { filterEvents, fetchEventsFromSupabase, getChileTodayStr } from '../../lib/events-store';
 import EventCard from '../../components/EventCard';
 import SearchBar from '../../components/SearchBar';
 import CategoryFilter from '../../components/CategoryFilter';
@@ -32,7 +32,7 @@ function SearchPageContent() {
   };
 
   useEffect(() => {
-    loadEvents();
+    void loadEvents();
   }, []);
 
   const todayStr = useMemo(() => getChileTodayStr(), []);
@@ -60,7 +60,6 @@ function SearchPageContent() {
   return (
     <div style={{ padding: '32px 0 80px' }}>
       <div className="container">
-        {/* Header */}
         <div style={{ marginBottom: '24px' }}>
           <Link
             href="/"
@@ -78,157 +77,61 @@ function SearchPageContent() {
           </Link>
 
           <h1 style={{ fontSize: 'clamp(24px, 4vw, 36px)', marginBottom: '8px' }}>
-            Explorador de <span className="text-gradient">Carretes V Región</span>
+            Explorar carretes
           </h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
-            Filtra por comuna, fecha, tipo de música o busca directamente por local.
+            Busca por local, comuna, estilo o fecha.
           </p>
         </div>
 
-        {/* Search Bar */}
-        <div style={{ marginBottom: '24px' }}>
-          <SearchBar value={searchQuery} onChange={setSearchQuery} />
+        <SearchBar value={searchQuery} onChange={setSearchQuery} />
+
+        <div style={{ marginTop: '20px' }}>
+          <CategoryFilter
+            selected={selectedCategory}
+            onSelect={setSelectedCategory}
+            counts={categoryCounts}
+          />
         </div>
 
-        {/* Panel de Filtros */}
-        <div className="glass-card" style={{ padding: '20px', marginBottom: '32px' }}>
-          {/* Fila 1: Fechas y Comunas */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap', marginBottom: '16px' }}>
-            <DateFilter
-              selected={selectedDate}
-              onSelect={setSelectedDate}
-              todayCount={todayCount}
-              futureCount={futureCount}
-            />
+        <div style={{ marginTop: '16px' }}>
+          <DateFilter
+            selected={selectedDate}
+            onSelect={setSelectedDate}
+            todayCount={todayCount}
+            futureCount={futureCount}
+          />
+        </div>
 
-            {/* Selector de Comuna */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-              <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Comuna:</span>
-              <button
-                onClick={() => setSelectedCity('todos')}
-                style={{
-                  fontSize: '12px',
-                  padding: '4px 10px',
-                  borderRadius: 'var(--radius-full)',
-                  background: selectedCity === 'todos' ? 'rgba(124,58,237,0.3)' : 'rgba(255,255,255,0.04)',
-                  border: selectedCity === 'todos' ? '1px solid #a78bfa' : '1px solid var(--color-border)',
-                  color: selectedCity === 'todos' ? '#fff' : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                }}
-              >
-                Todas
-              </button>
-              {CIUDADES.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setSelectedCity(c)}
-                  style={{
-                    fontSize: '12px',
-                    padding: '4px 10px',
-                    borderRadius: 'var(--radius-full)',
-                    background: selectedCity === c ? 'rgba(124,58,237,0.3)' : 'rgba(255,255,255,0.04)',
-                    border: selectedCity === c ? '1px solid #a78bfa' : '1px solid var(--color-border)',
-                    color: selectedCity === c ? '#fff' : 'var(--text-secondary)',
-                    cursor: 'pointer',
-                  }}
-                >
-                  {c}
-                </button>
-              ))}
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', marginTop: '18px' }}>
+          <select className="form-select" value={selectedCity} onChange={(e) => setSelectedCity(e.target.value)} style={{ maxWidth: '220px' }}>
+            <option value="todos">Toda la V Región</option>
+            {CIUDADES.map((city) => <option key={city} value={city}>{city}</option>)}
+          </select>
+          <select className="form-select" value={selectedPrice} onChange={(e) => setSelectedPrice(e.target.value as 'todos' | 'gratis' | 'pago')} style={{ maxWidth: '220px' }}>
+            <option value="todos">Cualquier precio</option>
+            <option value="gratis">Gratis</option>
+            <option value="pago">De pago</option>
+          </select>
+        </div>
+
+        <div style={{ marginTop: '32px' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '12px', marginBottom: '18px' }}>
+            <h2 style={{ fontSize: '20px' }}>Resultados</h2>
+            <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>{filteredEvents.length} eventos</span>
+          </div>
+
+          {filteredEvents.length > 0 ? (
+            <div className="event-grid">
+              {filteredEvents.map((event) => <EventCard key={event.id} evento={event} />)}
             </div>
-          </div>
-
-          {/* Fila 2: Categorías */}
-          <CategoryFilter selected={selectedCategory} onSelect={setSelectedCategory} counts={categoryCounts} />
-
-          {/* Fila 3: Precio & Reset */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '16px', paddingTop: '14px', borderTop: '1px solid var(--color-border)', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Precio:</span>
-            <button
-              onClick={() => setSelectedPrice('todos')}
-              style={{
-                fontSize: '11px',
-                padding: '3px 10px',
-                borderRadius: 'var(--radius-full)',
-                background: selectedPrice === 'todos' ? 'rgba(255,255,255,0.1)' : 'transparent',
-                border: '1px solid var(--color-border)',
-                color: selectedPrice === 'todos' ? '#fff' : 'var(--text-muted)',
-                cursor: 'pointer',
-              }}
-            >
-              Cualquiera
-            </button>
-            <button
-              onClick={() => setSelectedPrice('gratis')}
-              style={{
-                fontSize: '11px',
-                padding: '3px 10px',
-                borderRadius: 'var(--radius-full)',
-                background: selectedPrice === 'gratis' ? 'rgba(16,185,129,0.2)' : 'transparent',
-                border: selectedPrice === 'gratis' ? '1px solid #10b981' : '1px solid var(--color-border)',
-                color: selectedPrice === 'gratis' ? '#6ee7b7' : 'var(--text-muted)',
-                cursor: 'pointer',
-              }}
-            >
-              Solo Gratis
-            </button>
-            <button
-              onClick={() => setSelectedPrice('pago')}
-              style={{
-                fontSize: '11px',
-                padding: '3px 10px',
-                borderRadius: 'var(--radius-full)',
-                background: selectedPrice === 'pago' ? 'rgba(245,158,11,0.2)' : 'transparent',
-                border: selectedPrice === 'pago' ? '1px solid #f59e0b' : '1px solid var(--color-border)',
-                color: selectedPrice === 'pago' ? '#fcd34d' : 'var(--text-muted)',
-                cursor: 'pointer',
-              }}
-            >
-              Con Entrada
-            </button>
-
-            <button
-              onClick={() => {
-                setSearchQuery('');
-                setSelectedCategory('todos');
-                setSelectedCity('todos');
-                setSelectedDate('todos');
-                setSelectedPrice('todos');
-              }}
-              style={{
-                fontSize: '11px',
-                color: '#ec4899',
-                background: 'transparent',
-                marginLeft: 'auto',
-                textDecoration: 'underline',
-                cursor: 'pointer',
-              }}
-            >
-              Limpiar filtros
-            </button>
-          </div>
+          ) : (
+            <div className="glass-card" style={{ padding: '36px', textAlign: 'center' }}>
+              <h3 style={{ marginBottom: '8px' }}>No encontramos eventos con esos filtros</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>Prueba ampliar la fecha, comuna o categoría.</p>
+            </div>
+          )}
         </div>
-
-        {/* Resultados */}
-        <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>
-            Mostrando <strong>{filteredEvents.length}</strong> {filteredEvents.length === 1 ? 'carrete' : 'carretes'}
-          </span>
-        </div>
-
-        {filteredEvents.length > 0 ? (
-          <div className="event-grid stagger">
-            {filteredEvents.map((evt) => (
-              <EventCard key={evt.id} evento={evt} onRsvpChange={loadEvents} />
-            ))}
-          </div>
-        ) : (
-          <div className="empty-state glass-card">
-            <div className="empty-state-icon">🔍</div>
-            <h3>Sin resultados</h3>
-            <p>Prueba combinando otros filtros o busca algo más general.</p>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -236,7 +139,7 @@ function SearchPageContent() {
 
 export default function SearchPage() {
   return (
-    <Suspense fallback={<div className="container" style={{ padding: '60px 0', textAlign: 'center' }}>Cargando explorador...</div>}>
+    <Suspense fallback={<div className="container" style={{ padding: '80px 0' }}>Cargando explorador…</div>}>
       <SearchPageContent />
     </Suspense>
   );
