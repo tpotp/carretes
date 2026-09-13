@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { EventoFormData } from '../../../lib/types';
+import { toChileDateString } from '../../../lib/event-extraction';
 
 const ALLOWED_CATEGORIES = new Set([
   'universitario',
@@ -65,6 +66,13 @@ export async function POST(request: Request) {
       );
     }
 
+    if (fecha < toChileDateString(new Date())) {
+      return NextResponse.json(
+        { success: false, error: 'La fecha del evento no puede estar en el pasado' },
+        { status: 400 },
+      );
+    }
+
     const priceNumber = typeof body.precio === 'number' && Number.isFinite(body.precio) && body.precio >= 0
       ? Math.round(body.precio)
       : null;
@@ -100,8 +108,8 @@ export async function POST(request: Request) {
       username: organizer.replace(/^@/, ''),
       likes: 0,
       scraped_at: new Date().toISOString(),
-      source: 'manual',
-      is_active: true,
+      source: 'manual_pending',
+      is_active: false,
     };
 
     const supabase = createClient(supabaseUrl, serverKey, {
@@ -122,7 +130,10 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ success: true, evento: data }, { status: 201 });
+    return NextResponse.json(
+      { success: true, pending_review: true, evento: data },
+      { status: 201 },
+    );
   } catch (error) {
     console.error('[api/publicar]', error);
     return NextResponse.json(
